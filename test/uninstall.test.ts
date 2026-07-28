@@ -49,6 +49,37 @@ describe('gstack-uninstall', () => {
       fs.symlinkSync('gstack/review', path.join(mockHome, '.claude', 'skills', 'review'));
       fs.symlinkSync('gstack/ship', path.join(mockHome, '.claude', 'skills', 'gstack-ship'));
 
+      // Current layout: setup creates a DIRECTORY per skill holding symlinks, not a
+      // symlink per skill. 'browse' holds one link; 'ship-dir' holds two (SKILL.md plus
+      // an auxiliary path), mirroring what setup actually produces today.
+      const skills = path.join(mockHome, '.claude', 'skills');
+      fs.mkdirSync(path.join(skills, 'browse'), { recursive: true });
+      fs.symlinkSync(
+        path.join(skills, 'gstack', 'browse', 'SKILL.md'),
+        path.join(skills, 'browse', 'SKILL.md'),
+      );
+      fs.mkdirSync(path.join(skills, 'ship-dir'), { recursive: true });
+      fs.symlinkSync(
+        path.join(skills, 'gstack', 'ship', 'SKILL.md'),
+        path.join(skills, 'ship-dir', 'SKILL.md'),
+      );
+      fs.symlinkSync(
+        path.join(skills, 'gstack', 'ship', 'sections'),
+        path.join(skills, 'ship-dir', 'sections'),
+      );
+
+      // A directory holding a gstack link AND something else must survive intact — a
+      // user's own file must never be deleted just because gstack shares the directory.
+      fs.mkdirSync(path.join(skills, 'mixed'), { recursive: true });
+      fs.symlinkSync(
+        path.join(skills, 'gstack', 'qa', 'SKILL.md'),
+        path.join(skills, 'mixed', 'SKILL.md'),
+      );
+      fs.writeFileSync(path.join(skills, 'mixed', 'notes.md'), 'user content');
+
+      // A broken symlink with nothing to do with gstack must be left alone.
+      fs.symlinkSync('../../.agents/skills/find-skills', path.join(skills, 'find-skills'));
+
       // Create a non-gstack symlink (should NOT be removed)
       fs.mkdirSync(path.join(mockHome, '.claude', 'skills', 'other-tool'), { recursive: true });
 
@@ -93,6 +124,38 @@ describe('gstack-uninstall', () => {
 
       // State should be removed
       expect(fs.existsSync(path.join(mockHome, '.gstack'))).toBe(false);
+    });
+
+    test('removes per-skill directories of symlinks, not just per-skill symlinks', () => {
+      const skills = path.join(mockHome, '.claude', 'skills');
+
+      const result = spawnSync('bash', [UNINSTALL, '--force'], {
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          HOME: mockHome,
+          GSTACK_DIR: path.join(skills, 'gstack'),
+          GSTACK_STATE_DIR: path.join(mockHome, '.gstack'),
+        },
+        cwd: mockGitRoot,
+      });
+
+      expect(result.status).toBe(0);
+
+      // The directory layout setup actually produces must be removed, single-link
+      // and multi-link alike. Before the fix these survived as dangling symlinks.
+      expect(fs.existsSync(path.join(skills, 'browse'))).toBe(false);
+      expect(fs.existsSync(path.join(skills, 'ship-dir'))).toBe(false);
+
+      // A directory we do not fully own is left completely alone.
+      expect(fs.existsSync(path.join(skills, 'mixed', 'notes.md'))).toBe(true);
+
+      // An unrelated broken symlink is not ours to clean up. existsSync follows the
+      // link and so reports false on a dangling one — lstat is what proves it is still there.
+      expect(fs.lstatSync(path.join(skills, 'find-skills')).isSymbolicLink()).toBe(true);
+
+      // Empty non-gstack directories survive too (nothing inside points at gstack).
+      expect(fs.existsSync(path.join(skills, 'other-tool'))).toBe(true);
     });
 
     test('--keep-state preserves state directory', () => {
