@@ -128,19 +128,59 @@ if [ -d "$STATE_DIR/projects" ]; then
   done < <(find "$STATE_DIR/projects" -name browse.json -path '*/.gstack/*' 2>/dev/null || true)
 fi
 
+# ─── Remove per-skill entries created by setup ───────────────
+# setup has linked skills two different ways, and an install can hold either:
+#   ~/.claude/skills/review          -> symlink into gstack/            (older layout)
+#   ~/.claude/skills/browse/SKILL.md -> symlink into gstack/            (current layout,
+#                                       i.e. a real DIRECTORY of symlinks, sometimes
+#                                       more than one: ship/ has SKILL.md + sections)
+# Only handling the first left ~55 orphaned directories of dangling symlinks behind.
+#
+# A directory is removed only when every entry inside it is a symlink into gstack/:
+# unrelated skills share this parent, so anything mixed is left alone, as is any
+# pre-existing broken symlink that does not point into gstack/.
+#
+# Matching is textual (readlink), never existence-based — callers may have already
+# deleted the targets, and a dangling link still has to be recognised as ours.
+remove_skill_links() {
+  local parent="$1" label="$2"
+  [ -d "$parent" ] || return 0
+
+  local entry name target inner gstack_links other
+  for entry in "$parent"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="$(basename "$entry")"
+    [ "$name" = "gstack" ] && continue
+
+    if [ -L "$entry" ]; then
+      target="$(readlink "$entry" 2>/dev/null || true)"
+      case "$target" in
+        gstack/*|*/gstack/*) rm -f "$entry" && REMOVED+=("$label/$name") ;;
+      esac
+      continue
+    fi
+
+    [ -d "$entry" ] || continue
+    gstack_links=0
+    other=0
+    for inner in "$entry"/* "$entry"/.[!.]*; do
+      [ -e "$inner" ] || [ -L "$inner" ] || continue
+      target="$(readlink "$inner" 2>/dev/null || true)"
+      case "$target" in
+        gstack/*|*/gstack/*) gstack_links=$(( gstack_links + 1 )) ;;
+        *) other=$(( other + 1 )) ;;
+      esac
+    done
+    if [ "$gstack_links" -gt 0 ] && [ "$other" -eq 0 ]; then
+      rm -rf "$entry" && REMOVED+=("$label/$name")
+    fi
+  done
+}
+
 # ─── Remove global Claude skills ────────────────────────────
 CLAUDE_SKILLS="$HOME/.claude/skills"
 if [ -d "$CLAUDE_SKILLS/gstack" ] || [ -L "$CLAUDE_SKILLS/gstack" ]; then
-  # Remove per-skill symlinks that point into gstack/
-  for _LINK in "$CLAUDE_SKILLS"/*; do
-    [ -L "$_LINK" ] || continue
-    _NAME="$(basename "$_LINK")"
-    [ "$_NAME" = "gstack" ] && continue
-    _TARGET="$(readlink "$_LINK" 2>/dev/null || true)"
-    case "$_TARGET" in
-      gstack/*|*/gstack/*) rm -f "$_LINK"; REMOVED+=("claude/$_NAME") ;;
-    esac
-  done
+  remove_skill_links "$CLAUDE_SKILLS" "claude"
 
   rm -rf "$CLAUDE_SKILLS/gstack"
   REMOVED+=("~/.claude/skills/gstack")
@@ -148,13 +188,7 @@ fi
 
 # ─── Remove project-local Claude skills (--local installs) ──
 if [ -n "$_GIT_ROOT" ] && [ -d "$_GIT_ROOT/.claude/skills" ]; then
-  for _LINK in "$_GIT_ROOT/.claude/skills"/*; do
-    [ -L "$_LINK" ] || continue
-    _TARGET="$(readlink "$_LINK" 2>/dev/null || true)"
-    case "$_TARGET" in
-      gstack/*|*/gstack/*) rm -f "$_LINK"; REMOVED+=("local claude/$(basename "$_LINK")") ;;
-    esac
-  done
+  remove_skill_links "$_GIT_ROOT/.claude/skills" "local claude"
   if [ -d "$_GIT_ROOT/.claude/skills/gstack" ] || [ -L "$_GIT_ROOT/.claude/skills/gstack" ]; then
     rm -rf "$_GIT_ROOT/.claude/skills/gstack"
     REMOVED+=("$_GIT_ROOT/.claude/skills/gstack")
